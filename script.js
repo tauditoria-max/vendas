@@ -726,7 +726,7 @@ async function verUltimas(tipo) {
             }
         }
 
-        const fila = lerFila();
+                const fila = lerFila();
         fila.forEach(item => {
             if (item.loja !== lojaSelecionada) return;
             if (item.auditor !== usuarioLogado) return;
@@ -735,7 +735,7 @@ async function verUltimas(tipo) {
             if (item.dataHoraLocal) {
                 const d = new Date(item.dataHoraLocal);
                 if (d < inicioDia || d > fimDia) return;
-                item._id = item._localId;
+                item._id = item._localId;  // <-- garante que o ID é o _localId
                 item._origem = 'fila';
                 item._timestampMs = d.getTime();
                 todos.push(item);
@@ -792,28 +792,22 @@ async function verUltimas(tipo) {
                 info.innerHTML = `<strong>${horaStr}</strong>${pendenteIcon}<br>Esp: ${data.especulador_m}M / ${data.especulador_f}F<br>Acomp: ${data.acompanhante_m}M / ${data.acompanhante_f}F`;
             }
 
-            const acoes = document.createElement('div');
+                        const acoes = document.createElement('div');
             acoes.className = 'item-acoes';
 
-            if (data._origem === 'firebase') {
-                const btnEditar = document.createElement('button');
-                btnEditar.textContent = "✏️";
-                btnEditar.className = 'btn-item btn-editar';
-                btnEditar.onclick = () => editarRegistro(data._id, tipoBanco);
+            // Sempre permite editar e excluir (online e offline)
+            const btnEditar = document.createElement('button');
+            btnEditar.textContent = "✏️";
+            btnEditar.className = 'btn-item btn-editar';
+            btnEditar.onclick = () => editarRegistro(data._id, tipoBanco);
 
-                const btnExcluir = document.createElement('button');
-                btnExcluir.textContent = "🗑️";
-                btnExcluir.className = 'btn-item btn-excluir';
-                btnExcluir.onclick = () => excluirRegistro(data._id, tipoBanco);
+            const btnExcluir = document.createElement('button');
+            btnExcluir.textContent = "🗑️";
+            btnExcluir.className = 'btn-item btn-excluir';
+            btnExcluir.onclick = () => excluirRegistro(data._id, tipoBanco);
 
-                acoes.appendChild(btnEditar);
-                acoes.appendChild(btnExcluir);
-            } else {
-                const aviso = document.createElement('div');
-                aviso.style.cssText = "font-size:0.7rem; color:#d9534f; text-align:center; padding:6px;";
-                aviso.textContent = "Pendente";
-                acoes.appendChild(aviso);
-            }
+            acoes.appendChild(btnEditar);
+            acoes.appendChild(btnExcluir);
 
             item.appendChild(info);
             item.appendChild(acoes);
@@ -842,12 +836,38 @@ function fecharModal() {
 // ============================================================
 // EXCLUIR REGISTRO
 // ============================================================
+// ============================================================
+// EXCLUIR REGISTRO (funciona online e offline)
+// ============================================================
 async function excluirRegistro(id, tipo) {
-    if (!confirm("Tem certeza que deseja EXCLUIR este registro?")) return;
+    if (!confirm("Tem certeza que deseja EXCLUIR este registro? Essa ação não pode ser desfeita.")) return;
+
+    // Se o ID começa com "local_", é um item da fila (offline)
+    if (id && id.indexOf('local_') === 0) {
+        try {
+            // Remove da fila local
+            removerDaFila(id);
+            alert("Registro excluído localmente (offline).");
+            atualizarIndicadorFila();
+            atualizarInfoPainelAdmin();
+            // Recarrega o modal
+            verUltimas(tipo === 'venda' ? 'vendas' : (tipo === 'perda' ? 'perdas' : tipo));
+        } catch (err) {
+            console.error("Erro ao excluir item da fila:", err);
+            alert("Erro ao excluir: " + err.message);
+        }
+        return;
+    }
+
+    // Caso contrário, é um item do Firebase
+    if (!estaOnline() || !auth.currentUser) {
+        alert("Sem internet: não é possível excluir itens já sincronizados agora.\n\nTente novamente quando a conexão voltar.");
+        return;
+    }
 
     try {
         await db.collection('registros').doc(id).delete();
-        alert("Registro excluído!");
+        alert("Registro excluído do banco de dados!");
         verUltimas(tipo === 'venda' ? 'vendas' : (tipo === 'perda' ? 'perdas' : tipo));
     } catch (error) {
         console.error("Erro ao excluir:", error);
@@ -856,9 +876,20 @@ async function excluirRegistro(id, tipo) {
 }
 
 // ============================================================
-// EDITAR REGISTRO
+// EDITAR REGISTRO (funciona online e offline)
 // ============================================================
 async function editarRegistro(id, tipo) {
+    // Se o ID começa com "local_", é um item da fila (offline)
+    if (id && id.indexOf('local_') === 0) {
+        return await editarRegistroOffline(id, tipo);
+    }
+
+    // Caso contrário, é um item do Firebase
+    if (!estaOnline() || !auth.currentUser) {
+        alert("Sem internet: não é possível editar itens já sincronizados agora.\n\nTente novamente quando a conexão voltar.");
+        return;
+    }
+
     try {
         const docRef = db.collection('registros').doc(id);
         const docSnap = await docRef.get();
@@ -878,7 +909,7 @@ async function editarRegistro(id, tipo) {
             const novaVirada = confirm("Marcar como VIRADA? (OK = Sim, Cancelar = Não)");
 
             await docRef.update({
-                valor: parseFloat(novoValor),
+                valor: parseFloat(novoValor) || 0,
                 observacao: novasObs,
                 troca: novoTroca,
                 virada: novaVirada
@@ -903,6 +934,82 @@ async function editarRegistro(id, tipo) {
 
     } catch (error) {
         console.error("Erro ao editar:", error);
+        alert("Erro ao editar: " + error.message);
+    }
+}
+
+// ============================================================
+// EDITAR REGISTRO OFFLINE (item da fila)
+// ============================================================
+async function editarRegistroOffline(localId, tipo) {
+    const fila = lerFila();
+    const index = fila.findIndex(i => i._localId === localId);
+    if (index === -1) {
+        alert("Registro não encontrado na fila.");
+        return;
+    }
+
+    const item = fila[index];
+
+    try {
+        if (tipo === 'venda') {
+            const novoValor = prompt("Novo valor (R$):", item.valor);
+            if (novoValor === null) return;
+            const novaObs = prompt("Nova observação:", item.observacao || "");
+            if (novaObs === null) return;
+            const novoTroca = confirm("Marcar como TROCA? (OK = Sim, Cancelar = Não)");
+            const novaVirada = confirm("Marcar como VIRADA? (OK = Sim, Cancelar = Não)");
+
+            item.valor = parseFloat(novoValor) || 0;
+            item.observacao = novaObs;
+            item.troca = novoTroca;
+            item.virada = novaVirada;
+
+        } else if (tipo === 'perda') {
+            const novaObs = prompt("Nova observação:", item.observacao || "");
+            if (novaObs === null) return;
+            item.observacao = novaObs;
+
+            // Permite também trocar o motivo
+            const motivoAtual = item.motivo || "";
+            const novoMotivo = prompt("Motivo (Preço, Falta de Produto, Atendimento, Outros):", motivoAtual);
+            if (novoMotivo !== null && novoMotivo.trim() !== "") {
+                item.motivo = novoMotivo.trim();
+            }
+
+        } else if (tipo === 'fluxo') {
+            const novoEspM = prompt("Especulador Masculino:", item.especulador_m);
+            if (novoEspM === null) return;
+            const novoEspF = prompt("Especulador Feminino:", item.especulador_f);
+            if (novoEspF === null) return;
+            const novoAcompM = prompt("Acompanhante Masculino:", item.acompanhante_m);
+            if (novoAcompM === null) return;
+            const novoAcompF = prompt("Acompanhante Feminino:", item.acompanhante_f);
+            if (novoAcompF === null) return;
+            const novoOutM = prompt("Outros Masculino:", item.outros_m);
+            if (novoOutM === null) return;
+            const novoOutF = prompt("Outros Feminino:", item.outros_f);
+            if (novoOutF === null) return;
+
+            item.especulador_m = parseInt(novoEspM) || 0;
+            item.especulador_f = parseInt(novoEspF) || 0;
+            item.acompanhante_m = parseInt(novoAcompM) || 0;
+            item.acompanhante_f = parseInt(novoAcompF) || 0;
+            item.outros_m = parseInt(novoOutM) || 0;
+            item.outros_f = parseInt(novoOutF) || 0;
+        }
+
+        // Atualiza o item na fila
+        fila[index] = item;
+        salvarFila(fila);
+
+        alert("Registro atualizado localmente! Será enviado ao Firebase quando a conexão voltar.");
+        atualizarIndicadorFila();
+        atualizarInfoPainelAdmin();
+        verUltimas(tipo === 'venda' ? 'vendas' : (tipo === 'perda' ? 'perdas' : tipo));
+
+    } catch (error) {
+        console.error("Erro ao editar offline:", error);
         alert("Erro ao editar: " + error.message);
     }
 }
