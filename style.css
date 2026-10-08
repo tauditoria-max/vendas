@@ -15,18 +15,24 @@
     -webkit-tap-highlight-color: transparent;
 }
 
+html, body {
+    height: 100%;
+    overflow: hidden;
+}
+
 body {
     background-color: var(--fundo);
     color: var(--cinza-texto);
-    font-size: 16px;
-    height: 100vh;
-    overflow: hidden;
+    font-size: 15px; /* Reduzido de 16px para caber melhor no J2 Prime */
+    display: flex;
+    flex-direction: column;
 }
 
 .tela {
     display: none;
     height: 100%;
     flex-direction: column;
+    overflow: hidden;
 }
 .tela.ativa {
     display: flex;
@@ -148,9 +154,10 @@ body {
 /* --- CONTEÚDO --- */
 .conteudo-aba {
     display: none;
-    padding: 20px;
+    padding: 15px 15px 100px 15px; /* padding-bottom grande para não cortar botões */
     overflow-y: auto;
     flex: 1;
+    -webkit-overflow-scrolling: touch; /* rolagem suave no Android antigo */
 }
 .conteudo-aba.ativa {
     display: block;

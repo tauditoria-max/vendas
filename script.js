@@ -674,7 +674,7 @@ async function salvarPerda() {
     const resultado = await salvarComFila(dados);
 
     if (resultado.offline) {
-        alert("⚠ Sem internet: perda salva localmente. Será enviada quando a conexão voltar.");
+        alert("Perda Registrada.");
     } else {
         alert("Perda gravada com sucesso!");
     }
