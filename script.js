@@ -516,7 +516,7 @@ async function salvarVenda() {
     const resultado = await salvarComFila(dados);
 
     if (resultado.offline) {
-        alert("⚠ Sem internet: venda salva localmente. Será enviada quando a conexão voltar.");
+        alert("Venda Registrada.");
     } else {
         alert("Venda gravada com sucesso!");
     }
