@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Auditoria Shopping</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+</head>
+<body>
+
+    <!-- TELA DE LOGIN -->
+    <div id="tela-login" class="tela ativa">
+        <div class="login-container">
+            <h1>Auditoria</h1>
+            <p class="subtitulo">Tacaruna</p>
+            <input type="text" id="login-usuario" placeholder="Usuário" autocapitalize="none" autocomplete="off">
+            <input type="password" id="login-senha" placeholder="Senha">
+            <button onclick="fazerLogin()" class="btn-primario">Entrar</button>
+            <p id="login-erro" class="erro"></p>
+        </div>
+    </div>
+
+    <!-- TELA DE SELEÇÃO DE LOJA -->
+    <div id="tela-lojas" class="tela">
+<header class="top-bar">
+    <h2>Selecione a Loja</h2>
+    <div style="display:flex; gap:8px; align-items:center;">
+        <span id="indicador-fila" class="badge-fila" style="display:none;">0</span>
+        <button onclick="sincronizarFila()" class="btn-sair" title="Sincronizar agora">🔄</button>
+        <button id="btn-sync-admin" onclick="sincronizarTudoAdmin()" class="btn-sair" title="Sincronização completa (admin)" style="display:none; background:#2f75b5;">🔁 Tudo</button>
+        <button id="btn-exportar" onclick="abrirExportacao('lojas')" class="btn-sair" title="Exportar dados" style="display:none;">📥</button>
+        <button onclick="fazerLogout()" class="btn-sair">Sair</button>
+    </div>
+</header>
+        <div id="lista-lojas" class="grid-lojas"></div>
+        <div id="painel-admin-sync" class="painel-admin" style="display:none;">
+    <div class="painel-admin-header">🔁 Painel de Sincronização (Admin)</div>
+    <div class="painel-admin-body">
+        <div class="painel-linha">
+            <span>Itens pendentes neste dispositivo:</span>
+            <strong id="admin-qtd-fila">0</strong>
+        </div>
+        <div class="painel-linha">
+            <span>Última sincronização:</span>
+            <strong id="admin-ultima-sync">—</strong>
+        </div>
+        <div class="painel-linha">
+            <span>Status:</span>
+            <strong id="admin-status-sync">Pronto</strong>
+        </div>
+        <button onclick="sincronizarTudoAdmin()" class="btn-primario" style="margin-top:12px;">
+            🔁 Sincronizar Tudo Agora
+        </button>
+    </div>
+</div>
+        <div id="status-conexao" class="aviso-offline" style="display:none;">
+            ⚠ Você está offline. Os dados estão sendo salvos localmente e serão enviados quando a conexão voltar.
+        </div>
+        <div id="sessao-offline-aviso" class="aviso-offline" style="display:none; background:#e6f0fa; color:#1f4e78; border-top-color:#2f75b5;">
+            ℹ Sessão offline ativa. Ao voltar a internet, clique em 🔄 e digite sua senha para sincronizar.
+        </div>
+    </div>
+
+    <!-- TELA PRINCIPAL -->
+    <div id="tela-principal" class="tela">
+        <header class="top-bar">
+            <div class="header-info">
+                <span id="nome-loja-header">Loja</span>
+                <small id="nome-auditor-header">Auditor</small>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <button onclick="voltarParaLojas()" class="btn-voltar">Trocar Loja</button>
+            </div>
+        </header>
+
+        <nav class="abas">
+            <button id="aba-vendas" class="aba ativa" onclick="mudarAba('vendas')">Vendas</button>
+            <button id="aba-fluxo" class="aba" onclick="mudarAba('fluxo')">Fluxo</button>
+            <button id="aba-perdas" class="aba" onclick="mudarAba('perdas')">Perdas</button>
+        </nav>
+
+        <!-- VENDAS -->
+        <div id="conteudo-vendas" class="conteudo-aba ativa">
+            <div class="form-group">
+                <label>Valor:</label>
+                <input type="number" id="venda-valor" placeholder="R$ 0,00" step="0.01">
+            </div>
+            <div class="form-group">
+                <label>Sexo:</label>
+                <select id="venda-sexo">
+                    <option value="">Selecione...</option>
+                    <option value="Masculino">Masculino</option>
+                    <option value="Feminino">Feminino</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Forma de Pagamento:</label>
+                <select id="venda-pagamento">
+                    <option value="">Selecione...</option>
+                    <option value="Dinheiro">Dinheiro</option>
+                    <option value="Cartão de Crédito">Cartão de Crédito</option>
+                    <option value="Cartão de Débito">Cartão de Débito</option>
+                    <option value="PIX">PIX</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Observação:</label>
+                <textarea id="venda-obs" rows="2"></textarea>
+            </div>
+            <div class="checkbox-group">
+                <label><input type="checkbox" id="venda-troca"> Troca</label>
+                <label><input type="checkbox" id="venda-virada"> Virada</label>
+            </div>
+            <div class="botoes-acao">
+                <button onclick="salvarVenda()" class="btn-primario">Gravar</button>
+                <button onclick="verUltimas('vendas')" class="btn-secundario">Últimas</button>
+            </div>
+        </div>
+
+        <!-- FLUXO -->
+        <div id="conteudo-fluxo" class="conteudo-aba">
+            <div class="fluxo-header">
+                <span class="col-masculino">♂ Masculino</span>
+                <span class="col-feminino">♀ Feminino</span>
+            </div>
+
+            <div class="fluxo-secao">
+                <div class="fluxo-titulo">Especulador</div>
+                <div class="fluxo-linha">
+                    <div class="fluxo-controles">
+                        <button onclick="alterarFluxo('esp-m', -1)">−</button>
+                        <input type="number" id="fluxo-esp-m" value="0" readonly>
+                        <button onclick="alterarFluxo('esp-m', 1)">+</button>
+                    </div>
+                    <div class="fluxo-controles">
+                        <button onclick="alterarFluxo('esp-f', -1)">−</button>
+                        <input type="number" id="fluxo-esp-f" value="0" readonly>
+                        <button onclick="alterarFluxo('esp-f', 1)">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="fluxo-secao">
+                <div class="fluxo-titulo">Acompanhante</div>
+                <div class="fluxo-linha">
+                    <div class="fluxo-controles">
+                        <button onclick="alterarFluxo('acomp-m', -1)">−</button>
+                        <input type="number" id="fluxo-acomp-m" value="0" readonly>
+                        <button onclick="alterarFluxo('acomp-m', 1)">+</button>
+                    </div>
+                    <div class="fluxo-controles">
+                        <button onclick="alterarFluxo('acomp-f', -1)">−</button>
+                        <input type="number" id="fluxo-acomp-f" value="0" readonly>
+                        <button onclick="alterarFluxo('acomp-f', 1)">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="fluxo-secao">
+                <div class="fluxo-titulo">Outros</div>
+                <div class="fluxo-linha">
+                    <div class="fluxo-controles">
+                        <button onclick="alterarFluxo('out-m', -1)">−</button>
+                        <input type="number" id="fluxo-out-m" value="0" readonly>
+                        <button onclick="alterarFluxo('out-m', 1)">+</button>
+                    </div>
+                    <div class="fluxo-controles">
+                        <button onclick="alterarFluxo('out-f', -1)">−</button>
+                        <input type="number" id="fluxo-out-f" value="0" readonly>
+                        <button onclick="alterarFluxo('out-f', 1)">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="fluxo-status" id="fluxo-status">Todos os toques são salvos automaticamente ✓</div>
+
+            <button onclick="verUltimas('fluxo')" class="btn-secundario mt-20">Últimos Registros</button>
+        </div>
+
+        <!-- PERDAS -->
+        <div id="conteudo-perdas" class="conteudo-aba">
+            <div class="form-group">
+                <label>Motivo da Perda:</label>
+                <select id="perda-motivo">
+                    <option value="">Selecione...</option>
+                    <option value="Preço">Preço</option>
+                    <option value="Falta de Produto">Falta de Produto</option>
+                    <option value="Atendimento">Atendimento</option>
+                    <option value="Outros">Outros</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Observação:</label>
+                <textarea id="perda-obs" rows="4"></textarea>
+            </div>
+            <div class="botoes-acao">
+                <button onclick="salvarPerda()" class="btn-primario">Gravar</button>
+                <button onclick="verUltimas('perdas')" class="btn-secundario">Últimas</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- TELA DE EXPORTAÇÃO -->
+    <div id="tela-exportar" class="tela">
+        <header class="top-bar">
+            <h2>Exportar Dados</h2>
+            <button onclick="fecharExportacao()" class="btn-voltar">Voltar</button>
+        </header>
+
+        <div style="padding: 20px; overflow-y: auto; flex: 1;">
+            <div class="form-group">
+                <label>Loja:</label>
+                <select id="export-loja">
+                    <option value="">Todas as lojas</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label>Auditor:</label>
+                <select id="export-auditor">
+                    <option value="">Todos os auditores</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label>Data Inicial:</label>
+                <input type="date" id="export-data-inicio">
+            </div>
+
+            <div class="form-group">
+                <label>Data Final:</label>
+                <input type="date" id="export-data-fim">
+            </div>
+
+            <div class="checkbox-group" style="margin-top: 10px;">
+                <label><input type="checkbox" id="export-incluir-vendas" checked> Vendas</label>
+                <label><input type="checkbox" id="export-incluir-fluxo" checked> Fluxo</label>
+                <label><input type="checkbox" id="export-incluir-perdas" checked> Perdas</label>
+            </div>
+
+            <button onclick="exportarDados()" class="btn-primario mt-20">
+                📥 Gerar Arquivo CSV
+            </button>
+
+            <div id="export-status" class="fluxo-status" style="margin-top: 15px;">
+                Selecione o período e clique em Gerar.
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL ÚLTIMOS -->
+    <div id="modal-ultimos" class="modal">
+        <div class="modal-content">
+            <span class="fechar-modal" onclick="fecharModal()">&times;</span>
+            <h3>Últimos Registros</h3>
+            <div id="lista-ultimos"></div>
+        </div>
+    </div>
+
+    <script src="firebase-config.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
