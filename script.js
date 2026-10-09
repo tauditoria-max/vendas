@@ -1,7 +1,7 @@
 // ============================================================
 // AUDITORIA SHOPPING - SCRIPT PRINCIPAL
 // Compatível com Android 6.0.1 Marshmallow
-// Suporte a login offline + fila de sincronização
+// Login offline + fila de sincronização + painel admin
 // ============================================================
 
 // --- CONFIGURAÇÕES GLOBAIS ---
@@ -23,9 +23,10 @@ let usuarioLogado = null;
 let lojaSelecionada = null;
 let fluxoDocIdHoje = null;
 let exportacaoOrigem = 'lojas';
+let sincronizandoAgora = false;
 
 // ============================================================
-// SISTEMA DE LOGIN OFFLINE (cache de credenciais)
+// LOGIN OFFLINE - CACHE DE CREDENCIAIS
 // ============================================================
 const CRED_KEY = 'auditoria_credenciais';
 const SESSAO_KEY = 'auditoria_sessao_offline';
@@ -119,7 +120,7 @@ function ehErroDeRede(error) {
 }
 
 // ============================================================
-// SISTEMA DE FILA OFFLINE
+// FILA OFFLINE
 // ============================================================
 const FILA_KEY = 'auditoria_fila_sync';
 
@@ -142,10 +143,28 @@ function salvarFila(fila) {
     }
 }
 
+function gerarIdUnico(item) {
+    const data = item.dataHoraLocal || new Date().toISOString();
+    const lojaLimpa = (item.loja || '').replace(/[^a-zA-Z0-9]/g, '');
+    const auditorLimpo = (item.auditor || '').replace(/[^a-zA-Z0-9]/g, '');
+    const dataLimpa = data.replace(/[^0-9]/g, '');
+    let hash = 0;
+    const seed = JSON.stringify(item);
+    for (let i = 0; i < seed.length; i++) {
+        hash = ((hash << 5) - hash) + seed.charCodeAt(i);
+        hash = hash & hash;
+    }
+    const hashStr = Math.abs(hash).toString(36).substr(0, 6);
+    return item.tipo + '_' + lojaLimpa + '_' + auditorLimpo + '_' + dataLimpa + '_' + hashStr;
+}
+
 function adicionarNaFila(item) {
     const fila = lerFila();
     item._localId = 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     item._dataLocal = new Date().toISOString();
+    if (!item._docId) {
+        item._docId = gerarIdUnico(item);
+    }
     fila.push(item);
     salvarFila(fila);
     return item._localId;
@@ -176,14 +195,25 @@ function estaOnline() {
     return navigator.onLine !== false;
 }
 
-async function sincronizarFila() {
+// ============================================================
+// SINCRONIZAÇÃO COM TRAVA (evita duplicação)
+// ============================================================
+async function sincronizarFila(silencioso) {
+    if (sincronizandoAgora) {
+        console.log("Sincronização já em andamento. Ignorando chamada duplicada.");
+        return;
+    }
+
     if (!estaOnline()) {
         console.log("Offline: sincronização adiada.");
         return;
     }
 
-    // Se não tem usuário Firebase mas tem sessão offline, pede a senha para reautenticar
     if (!auth.currentUser && lerSessaoOffline()) {
+        if (silencioso) {
+            console.log("Sessão offline sem auth — aguardando login manual.");
+            return;
+        }
         const sessao = lerSessaoOffline();
         const senha = prompt("Digite sua senha para sincronizar (" + sessao.usuario + "):");
         if (!senha) return;
@@ -193,7 +223,6 @@ async function sincronizarFila() {
             await auth.signInWithEmailAndPassword(emailFake, senha);
             usuarioLogado = sessao.usuario;
             await salvarCredencial(sessao.usuario, senha);
-            console.log("Reautenticado com sucesso.");
         } catch (err) {
             console.error("Falha ao reautenticar:", err);
             alert("Não foi possível reautenticar. Verifique a senha.");
@@ -212,14 +241,17 @@ async function sincronizarFila() {
         return;
     }
 
-    console.log("Sincronizando " + fila.length + " item(ns)...");
+    sincronizandoAgora = true;
+    console.log("🔒 Trava ativada. Sincronizando " + fila.length + " item(ns)...");
 
     for (let i = 0; i < fila.length; i++) {
         const item = fila[i];
         try {
             const dados = Object.assign({}, item);
+            const docId = dados._docId;
             delete dados._localId;
             delete dados._dataLocal;
+            delete dados._docId;
 
             if (dados.dataHoraLocal) {
                 dados.dataHora = firebase.firestore.Timestamp.fromDate(new Date(dados.dataHoraLocal));
@@ -228,23 +260,19 @@ async function sincronizarFila() {
                 dados.dataHora = firebase.firestore.FieldValue.serverTimestamp();
             }
 
-            if (dados._docId) {
-                const docId = dados._docId;
-                delete dados._docId;
-                await db.collection('registros').doc(docId).set(dados, { merge: true });
-            } else {
-                await db.collection('registros').add(dados);
-            }
-
+            await db.collection('registros').doc(docId).set(dados, { merge: false });
             removerDaFila(item._localId);
-            console.log("✓ Sincronizado: " + item.tipo);
+            console.log("✓ Sincronizado: " + item.tipo + " (id: " + docId + ")");
 
         } catch (err) {
             console.error("✗ Erro ao sincronizar item:", err);
         }
     }
 
+    sincronizandoAgora = false;
+    console.log("🔓 Trava liberada. Sincronização concluída.");
     atualizarStatusConexao();
+    atualizarInfoPainelAdmin();
 }
 
 async function salvarComFila(dados, docId) {
@@ -298,7 +326,7 @@ function atualizarStatusConexao() {
 }
 
 // ============================================================
-// NAVEGAÇÃO ENTRE TELAS
+// NAVEGAÇÃO
 // ============================================================
 function mostrarTela(idTela) {
     document.querySelectorAll('.tela').forEach(t => t.classList.remove('ativa'));
@@ -342,7 +370,7 @@ async function fazerLogin() {
     btnEntrar.disabled = true;
     erroEl.textContent = "";
 
-    // ---- CASO 1: SEM INTERNET ----
+    // CASO 1: SEM INTERNET
     if (!estaOnline()) {
         const valido = await validarCredencialOffline(usuario, senha);
         if (valido) {
@@ -369,7 +397,7 @@ async function fazerLogin() {
         }
     }
 
-    // ---- CASO 2: COM INTERNET - Tenta Firebase ----
+    // CASO 2: COM INTERNET - Firebase
     const emailFake = usuario + DOMINIO_FICTICIO;
 
     try {
@@ -453,13 +481,13 @@ function carregarLojas() {
 
     atualizarIndicadorFila();
     atualizarStatusConexao();
-    atualizarPainelAdmin(); // <-- NOVA LINHA
+    atualizarPainelAdmin();
 }
 
 function selecionarLoja(loja) {
     lojaSelecionada = loja;
     document.getElementById('nome-loja-header').textContent = loja;
-    document.getElementById('nome-auditor-header').textContent = `Auditor: ${usuarioLogado}`;
+    document.getElementById('nome-auditor-header').textContent = 'Auditor: ' + usuarioLogado;
     mostrarTela('tela-principal');
     mudarAba('vendas');
     fluxoDocIdHoje = null;
@@ -475,18 +503,15 @@ function voltarParaLojas() {
     atualizarStatusConexao();
 }
 
-// ============================================================
-// NAVEGAÇÃO DE ABAS
-// ============================================================
 function mudarAba(aba) {
     document.querySelectorAll('.aba').forEach(b => b.classList.remove('ativa'));
-    document.getElementById(`aba-${aba}`).classList.add('ativa');
+    document.getElementById('aba-' + aba).classList.add('ativa');
     document.querySelectorAll('.conteudo-aba').forEach(c => c.classList.remove('ativa'));
-    document.getElementById(`conteudo-${aba}`).classList.add('ativa');
+    document.getElementById('conteudo-' + aba).classList.add('ativa');
 }
 
 // ============================================================
-// SALVAR VENDA
+// SALVAR VENDA (com fila offline + validação reforçada)
 // ============================================================
 async function salvarVenda() {
     const valor = document.getElementById('venda-valor').value;
@@ -501,11 +526,17 @@ async function salvarVenda() {
         return;
     }
 
+    const valorNumerico = parseFloat(valor);
+    if (isNaN(valorNumerico) || valorNumerico <= 0) {
+        alert("Valor inválido. Digite um número maior que zero.");
+        return;
+    }
+
     const dados = {
         tipo: 'venda',
         loja: lojaSelecionada,
         auditor: usuarioLogado,
-        valor: parseFloat(valor),
+        valor: valorNumerico,
         sexo: sexo,
         pagamento: pagamento,
         observacao: obs,
@@ -516,7 +547,7 @@ async function salvarVenda() {
     const resultado = await salvarComFila(dados);
 
     if (resultado.offline) {
-        alert("Venda Registrada.");
+        alert("Venda registrada com sucesso.");
     } else {
         alert("Venda gravada com sucesso!");
     }
@@ -534,7 +565,7 @@ function limparFormularioVenda() {
 }
 
 // ============================================================
-// FLUXO - SALVAMENTO AUTOMÁTICO COM FILA
+// FLUXO - SALVAMENTO AUTOMÁTICO
 // ============================================================
 function getDataHoje() {
     const d = new Date();
@@ -544,7 +575,7 @@ function getDataHoje() {
 }
 
 async function alterarFluxo(id, valor) {
-    const input = document.getElementById(`fluxo-${id}`);
+    const input = document.getElementById('fluxo-' + id);
     let atual = parseInt(input.value) || 0;
     atual += valor;
     if (atual < 0) atual = 0;
@@ -572,11 +603,11 @@ async function salvarFluxoAuto() {
         outros_f: parseInt(document.getElementById('fluxo-out-f').value) || 0
     };
 
-    const idDoc = `fluxo_${lojaSelecionada.replace(/\s+/g, '-')}_${usuarioLogado}_${getDataHoje()}`;
+    const idDoc = 'fluxo_' + lojaSelecionada.replace(/\s+/g, '-') + '_' + usuarioLogado + '_' + getDataHoje();
     const resultado = await salvarComFila(dados, idDoc);
 
     if (resultado.offline) {
-        statusEl.textContent = "Salvo localmente (offline) ✓";
+        statusEl.textContent = "Registrado ✓";
         statusEl.className = "fluxo-status salvando";
     } else {
         statusEl.textContent = "Salvo automaticamente ✓";
@@ -584,8 +615,8 @@ async function salvarFluxoAuto() {
     }
 
     setTimeout(() => {
-        if (estaOnline() && statusEl.textContent === "Salvo automaticamente ✓") {
-            statusEl.textContent = "Todos os toques são salvos automaticamente ✓";
+        if (estaOnline() && statusEl.textContent === "Registrado ✓") {
+            statusEl.textContent = "Registrado ✓";
             statusEl.className = "fluxo-status";
         }
     }, 1500);
@@ -594,7 +625,7 @@ async function salvarFluxoAuto() {
 async function carregarFluxoHoje() {
     if (!lojaSelecionada || !usuarioLogado) return;
 
-    const idDoc = `fluxo_${lojaSelecionada.replace(/\s+/g, '-')}_${usuarioLogado}_${getDataHoje()}`;
+    const idDoc = 'fluxo_' + lojaSelecionada.replace(/\s+/g, '-') + '_' + usuarioLogado + '_' + getDataHoje();
 
     if (!estaOnline() || !auth.currentUser) {
         const fila = lerFila();
@@ -642,7 +673,7 @@ async function carregarFluxoHoje() {
             } else {
                 fluxoDocIdHoje = null;
                 ['esp-m', 'esp-f', 'acomp-m', 'acomp-f', 'out-m', 'out-f'].forEach(id => {
-                    document.getElementById(`fluxo-${id}`).value = 0;
+                    document.getElementById('fluxo-' + id).value = 0;
                 });
             }
         }
@@ -674,7 +705,7 @@ async function salvarPerda() {
     const resultado = await salvarComFila(dados);
 
     if (resultado.offline) {
-        alert("Perda Registrada.");
+        alert("Perda registrada com sucesso.");
     } else {
         alert("Perda gravada com sucesso!");
     }
@@ -684,7 +715,7 @@ async function salvarPerda() {
 }
 
 // ============================================================
-// ÚLTIMAS DO DIA (próprio auditor, inclui fila offline)
+// ÚLTIMAS DO DIA (apenas do próprio auditor, inclui fila offline)
 // ============================================================
 async function verUltimas(tipo) {
     const modal = document.getElementById('modal-ultimos');
@@ -711,14 +742,15 @@ async function verUltimas(tipo) {
 
                 snapshot.forEach(doc => {
                     const data = doc.data();
-                    data._id = doc.id;
-                    data._origem = 'firebase';
+                    if (data.tipo !== tipoBanco) return;
                     if (data.dataHora) {
                         const ts = data.dataHora.toMillis();
                         if (ts < inicioDia.getTime() || ts > fimDia.getTime()) return;
                     } else {
                         return;
                     }
+                    data._id = doc.id;
+                    data._origem = 'firebase';
                     todos.push(data);
                 });
             } catch (err) {
@@ -726,7 +758,7 @@ async function verUltimas(tipo) {
             }
         }
 
-                const fila = lerFila();
+        const fila = lerFila();
         fila.forEach(item => {
             if (item.loja !== lojaSelecionada) return;
             if (item.auditor !== usuarioLogado) return;
@@ -735,7 +767,7 @@ async function verUltimas(tipo) {
             if (item.dataHoraLocal) {
                 const d = new Date(item.dataHoraLocal);
                 if (d < inicioDia || d > fimDia) return;
-                item._id = item._localId;  // <-- garante que o ID é o _localId
+                item._id = item._localId;
                 item._origem = 'fila';
                 item._timestampMs = d.getTime();
                 todos.push(item);
@@ -760,7 +792,7 @@ async function verUltimas(tipo) {
         lista.innerHTML = "";
         const cabecalho = document.createElement('div');
         cabecalho.style.cssText = "background:#1f4e78; color:#fff; padding:8px 12px; border-radius:6px; margin-bottom:12px; font-size:0.85rem; text-align:center;";
-        cabecalho.innerHTML = `<strong>${dataHojeStr}</strong> — ${todos.length} registro(s) hoje`;
+        cabecalho.innerHTML = '<strong>' + dataHojeStr + '</strong> — ' + todos.length + ' registro(s) hoje';
         lista.appendChild(cabecalho);
 
         todos.forEach(data => {
@@ -784,18 +816,24 @@ async function verUltimas(tipo) {
             const pendenteIcon = data._origem === 'fila' ? ' <span style="color:#d9534f;">●</span>' : '';
 
             if (tipoBanco === 'venda') {
-                const v = typeof data.valor === 'number' ? data.valor.toFixed(2) : data.valor;
-                info.innerHTML = `<strong>${horaStr}</strong>${pendenteIcon} — R$ ${v}<br>${data.pagamento}${data.sexo ? ' · ' + data.sexo : ''}`;
+                let valorExibicao = "—";
+                if (typeof data.valor === 'number' && !isNaN(data.valor)) {
+                    valorExibicao = data.valor.toFixed(2).replace('.', ',');
+                } else if (typeof data.valor === 'string' && !isNaN(parseFloat(data.valor))) {
+                    valorExibicao = parseFloat(data.valor).toFixed(2).replace('.', ',');
+                }
+                info.innerHTML = '<strong>' + horaStr + '</strong>' + pendenteIcon + ' — R$ ' + valorExibicao + '<br>' + (data.pagamento || '—') + (data.sexo ? ' · ' + data.sexo : '');
             } else if (tipoBanco === 'perda') {
-                info.innerHTML = `<strong>${horaStr}</strong>${pendenteIcon} — ${data.motivo}${data.observacao ? '<br>' + data.observacao : ''}`;
+                info.innerHTML = '<strong>' + horaStr + '</strong>' + pendenteIcon + ' — ' + (data.motivo || '—') + (data.observacao ? '<br>' + data.observacao : '');
             } else if (tipoBanco === 'fluxo') {
-                info.innerHTML = `<strong>${horaStr}</strong>${pendenteIcon}<br>Esp: ${data.especulador_m}M / ${data.especulador_f}F<br>Acomp: ${data.acompanhante_m}M / ${data.acompanhante_f}F`;
+                info.innerHTML = '<strong>' + horaStr + '</strong>' + pendenteIcon + '<br>' +
+                                 'Esp: ' + (data.especulador_m || 0) + 'M / ' + (data.especulador_f || 0) + 'F<br>' +
+                                 'Acomp: ' + (data.acompanhante_m || 0) + 'M / ' + (data.acompanhante_f || 0) + 'F';
             }
 
-                        const acoes = document.createElement('div');
+            const acoes = document.createElement('div');
             acoes.className = 'item-acoes';
 
-            // Sempre permite editar e excluir (online e offline)
             const btnEditar = document.createElement('button');
             btnEditar.textContent = "✏️";
             btnEditar.className = 'btn-item btn-editar';
@@ -816,16 +854,32 @@ async function verUltimas(tipo) {
 
         if (tipoBanco === 'venda') {
             let totalDia = 0;
-            todos.forEach(v => { totalDia += parseFloat(v.valor) || 0; });
+            let itensInvalidos = 0;
+            todos.forEach(v => {
+                const val = parseFloat(v.valor);
+                if (!isNaN(val)) {
+                    totalDia += val;
+                } else {
+                    itensInvalidos++;
+                }
+            });
+
             const rodape = document.createElement('div');
             rodape.style.cssText = "background:#2f75b5; color:#fff; padding:10px; border-radius:6px; margin-top:12px; text-align:center; font-weight:bold;";
-            rodape.innerHTML = `Total do dia: R$ ${totalDia.toFixed(2).replace('.', ',')}`;
+            rodape.innerHTML = 'Total do dia: R$ ' + totalDia.toFixed(2).replace('.', ',');
             lista.appendChild(rodape);
+
+            if (itensInvalidos > 0) {
+                const aviso = document.createElement('div');
+                aviso.style.cssText = "background:#fff3cd; color:#856404; padding:8px; border-radius:6px; margin-top:8px; text-align:center; font-size:0.75rem;";
+                aviso.innerHTML = '⚠ ' + itensInvalidos + ' registro(s) com valor inválido (não contabilizado)';
+                lista.appendChild(aviso);
+            }
         }
 
     } catch (error) {
         console.error("Erro ao buscar últimas:", error);
-        lista.innerHTML = `<p style="color:#d9534f;">Erro: ${error.message}</p>`;
+        lista.innerHTML = '<p style="color:#d9534f;">Erro: ' + error.message + '</p>';
     }
 }
 
@@ -834,23 +888,17 @@ function fecharModal() {
 }
 
 // ============================================================
-// EXCLUIR REGISTRO
-// ============================================================
-// ============================================================
-// EXCLUIR REGISTRO (funciona online e offline)
+// EXCLUIR REGISTRO (online e offline)
 // ============================================================
 async function excluirRegistro(id, tipo) {
     if (!confirm("Tem certeza que deseja EXCLUIR este registro? Essa ação não pode ser desfeita.")) return;
 
-    // Se o ID começa com "local_", é um item da fila (offline)
     if (id && id.indexOf('local_') === 0) {
         try {
-            // Remove da fila local
             removerDaFila(id);
-            alert("Registro excluído localmente (offline).");
+            alert("Registro excluído com sucesso.");
             atualizarIndicadorFila();
             atualizarInfoPainelAdmin();
-            // Recarrega o modal
             verUltimas(tipo === 'venda' ? 'vendas' : (tipo === 'perda' ? 'perdas' : tipo));
         } catch (err) {
             console.error("Erro ao excluir item da fila:", err);
@@ -859,7 +907,6 @@ async function excluirRegistro(id, tipo) {
         return;
     }
 
-    // Caso contrário, é um item do Firebase
     if (!estaOnline() || !auth.currentUser) {
         alert("Sem internet: não é possível excluir itens já sincronizados agora.\n\nTente novamente quando a conexão voltar.");
         return;
@@ -876,15 +923,13 @@ async function excluirRegistro(id, tipo) {
 }
 
 // ============================================================
-// EDITAR REGISTRO (funciona online e offline)
+// EDITAR REGISTRO (online e offline)
 // ============================================================
 async function editarRegistro(id, tipo) {
-    // Se o ID começa com "local_", é um item da fila (offline)
     if (id && id.indexOf('local_') === 0) {
         return await editarRegistroOffline(id, tipo);
     }
 
-    // Caso contrário, é um item do Firebase
     if (!estaOnline() || !auth.currentUser) {
         alert("Sem internet: não é possível editar itens já sincronizados agora.\n\nTente novamente quando a conexão voltar.");
         return;
@@ -955,13 +1000,13 @@ async function editarRegistroOffline(localId, tipo) {
         if (tipo === 'venda') {
             const novoValor = prompt("Novo valor (R$):", item.valor);
             if (novoValor === null) return;
-            const novaObs = prompt("Nova observação:", item.observacao || "");
-            if (novaObs === null) return;
+            const novasObs = prompt("Nova observação:", item.observacao || "");
+            if (novasObs === null) return;
             const novoTroca = confirm("Marcar como TROCA? (OK = Sim, Cancelar = Não)");
             const novaVirada = confirm("Marcar como VIRADA? (OK = Sim, Cancelar = Não)");
 
             item.valor = parseFloat(novoValor) || 0;
-            item.observacao = novaObs;
+            item.observacao = novasObs;
             item.troca = novoTroca;
             item.virada = novaVirada;
 
@@ -970,7 +1015,6 @@ async function editarRegistroOffline(localId, tipo) {
             if (novaObs === null) return;
             item.observacao = novaObs;
 
-            // Permite também trocar o motivo
             const motivoAtual = item.motivo || "";
             const novoMotivo = prompt("Motivo (Preço, Falta de Produto, Atendimento, Outros):", motivoAtual);
             if (novoMotivo !== null && novoMotivo.trim() !== "") {
@@ -999,11 +1043,10 @@ async function editarRegistroOffline(localId, tipo) {
             item.outros_f = parseInt(novoOutF) || 0;
         }
 
-        // Atualiza o item na fila
         fila[index] = item;
         salvarFila(fila);
 
-        alert("Registro atualizado localmente! Será enviado ao Firebase quando a conexão voltar.");
+        alert("Registrado com sucesso.");
         atualizarIndicadorFila();
         atualizarInfoPainelAdmin();
         verUltimas(tipo === 'venda' ? 'vendas' : (tipo === 'perda' ? 'perdas' : tipo));
@@ -1012,6 +1055,154 @@ async function editarRegistroOffline(localId, tipo) {
         console.error("Erro ao editar offline:", error);
         alert("Erro ao editar: " + error.message);
     }
+}
+
+// ============================================================
+// PAINEL DE SINCRONIZAÇÃO GLOBAL (ADMIN)
+// ============================================================
+function atualizarPainelAdmin() {
+    const painel = document.getElementById('painel-admin-sync');
+    const btnSync = document.getElementById('btn-sync-admin');
+
+    if (!painel || !btnSync) return;
+
+    if (ehAdmin()) {
+        painel.style.display = 'block';
+        btnSync.style.display = 'inline-block';
+        atualizarInfoPainelAdmin();
+    } else {
+        painel.style.display = 'none';
+        btnSync.style.display = 'none';
+    }
+}
+
+function atualizarInfoPainelAdmin() {
+    const fila = lerFila();
+    const qtdEl = document.getElementById('admin-qtd-fila');
+    if (qtdEl) qtdEl.textContent = fila.length;
+
+    const ultimaEl = document.getElementById('admin-ultima-sync');
+    if (ultimaEl) {
+        const ultima = localStorage.getItem('auditoria_ultima_sync');
+        if (ultima) {
+            const d = new Date(ultima);
+            const dia = String(d.getDate()).padStart(2, '0');
+            const mes = String(d.getMonth() + 1).padStart(2, '0');
+            const hora = String(d.getHours()).padStart(2, '0');
+            const min = String(d.getMinutes()).padStart(2, '0');
+            ultimaEl.textContent = dia + '/' + mes + ' às ' + hora + ':' + min;
+        } else {
+            ultimaEl.textContent = "Nunca";
+        }
+    }
+}
+
+async function sincronizarTudoAdmin() {
+    if (!ehAdmin()) {
+        alert("Apenas o administrador pode usar esta função.");
+        return;
+    }
+
+    const statusEl = document.getElementById('admin-status-sync');
+    const btnSync = document.getElementById('btn-sync-admin');
+
+    if (!estaOnline()) {
+        alert("Sem internet no momento. Conecte-se e tente novamente.");
+        return;
+    }
+
+    if (!auth.currentUser) {
+        const sessao = lerSessaoOffline();
+        if (!sessao) {
+            alert("Sessão expirada. Faça login novamente.");
+            return;
+        }
+        const senha = prompt("Digite sua senha para reautenticar (" + sessao.usuario + "):");
+        if (!senha) return;
+
+        try {
+            const emailFake = sessao.usuario + DOMINIO_FICTICIO;
+            await auth.signInWithEmailAndPassword(emailFake, senha);
+            usuarioLogado = sessao.usuario;
+            await salvarCredencial(sessao.usuario, senha);
+        } catch (err) {
+            alert("Falha ao reautenticar. Verifique a senha.");
+            return;
+        }
+    }
+
+    const fila = lerFila();
+    if (fila.length === 0) {
+        if (statusEl) statusEl.textContent = "Nada para sincronizar.";
+        alert("Não há itens pendentes neste dispositivo.");
+        return;
+    }
+
+    if (statusEl) statusEl.textContent = "Sincronizando " + fila.length + " item(ns)...";
+    if (btnSync) btnSync.disabled = true;
+
+    let sucesso = 0;
+    let falhas = 0;
+
+    for (let i = 0; i < fila.length; i++) {
+        const item = fila[i];
+        try {
+            const dados = Object.assign({}, item);
+            delete dados._localId;
+            delete dados._dataLocal;
+
+            if (dados.dataHoraLocal) {
+                dados.dataHora = firebase.firestore.Timestamp.fromDate(new Date(dados.dataHoraLocal));
+                delete dados.dataHoraLocal;
+            } else if (!dados.dataHora) {
+                dados.dataHora = firebase.firestore.FieldValue.serverTimestamp();
+            }
+
+            if (dados._docId) {
+                const docId = dados._docId;
+                delete dados._docId;
+                await db.collection('registros').doc(docId).set(dados, { merge: true });
+            } else {
+                await db.collection('registros').add(dados);
+            }
+
+            removerDaFila(item._localId);
+            sucesso++;
+
+            if (statusEl) statusEl.textContent = 'Sincronizando... (' + sucesso + '/' + fila.length + ')';
+
+        } catch (err) {
+            console.error("✗ Erro ao sincronizar item:", err);
+            falhas++;
+        }
+    }
+
+    localStorage.setItem('auditoria_ultima_sync', new Date().toISOString());
+
+    if (btnSync) btnSync.disabled = false;
+
+    if (statusEl) {
+        if (falhas === 0) {
+            statusEl.textContent = '✓ ' + sucesso + ' item(ns) sincronizado(s)!';
+        } else {
+            statusEl.textContent = '⚠ ' + sucesso + ' OK / ' + falhas + ' falha(s)';
+        }
+    }
+
+    try {
+        await db.collection('sincronizacoes').add({
+            admin: usuarioLogado,
+            total: fila.length,
+            sucesso: sucesso,
+            falhas: falhas,
+            dataHora: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    } catch (e) {
+        console.warn("Não foi possível registrar a sincronização:", e);
+    }
+
+    atualizarInfoPainelAdmin();
+    atualizarIndicadorFila();
 }
 
 // ============================================================
@@ -1094,7 +1285,7 @@ function fecharExportacao() {
 }
 
 // ============================================================
-// EXPORTAÇÃO - GERAR CSV (inclui fila local)
+// EXPORTAÇÃO - GERAR CSV
 // ============================================================
 async function exportarDados() {
     if (!ehAdmin()) {
@@ -1185,9 +1376,9 @@ async function exportarDados() {
         });
 
         const csv = gerarCSV(todosRegistros);
-        baixarCSV(csv, `auditoria_${dataInicioStr}_a_${dataFimStr}.csv`);
+        baixarCSV(csv, 'auditoria_' + dataInicioStr + '_a_' + dataFimStr + '.csv');
 
-        statusEl.textContent = `✓ ${todosRegistros.length} registros exportados!`;
+        statusEl.textContent = '✓ ' + todosRegistros.length + ' registros exportados!';
         statusEl.className = "fluxo-status";
 
     } catch (error) {
@@ -1395,192 +1586,16 @@ function baixarCSV(conteudo, nomeArquivo) {
 }
 
 // ============================================================
-// PAINEL DE SINCRONIZAÇÃO GLOBAL (ADMIN)
-// ============================================================
-
-// Mostra/esconde o painel do admin
-function atualizarPainelAdmin() {
-    const painel = document.getElementById('painel-admin-sync');
-    const btnSync = document.getElementById('btn-sync-admin');
-    
-    if (!painel || !btnSync) return;
-
-    if (ehAdmin()) {
-        painel.style.display = 'block';
-        btnSync.style.display = 'inline-block';
-        atualizarInfoPainelAdmin();
-    } else {
-        painel.style.display = 'none';
-        btnSync.style.display = 'none';
-    }
-}
-
-// Atualiza os dados do painel (contagem, última sync, status)
-function atualizarInfoPainelAdmin() {
-    const fila = lerFila();
-    const qtdEl = document.getElementById('admin-qtd-fila');
-    if (qtdEl) qtdEl.textContent = fila.length;
-
-    const ultimaEl = document.getElementById('admin-ultima-sync');
-    if (ultimaEl) {
-        const ultima = localStorage.getItem('auditoria_ultima_sync');
-        if (ultima) {
-            const d = new Date(ultima);
-            const dia = String(d.getDate()).padStart(2, '0');
-            const mes = String(d.getMonth() + 1).padStart(2, '0');
-            const hora = String(d.getHours()).padStart(2, '0');
-            const min = String(d.getMinutes()).padStart(2, '0');
-            ultimaEl.textContent = `${dia}/${mes} às ${hora}:${min}`;
-        } else {
-            ultimaEl.textContent = "Nunca";
-        }
-    }
-}
-
-// Função chamada pelo botão "Sincronizar Tudo Agora"
-async function sincronizarTudoAdmin() {
-    if (!ehAdmin()) {
-        alert("Apenas o administrador pode usar esta função.");
-        return;
-    }
-
-    const statusEl = document.getElementById('admin-status-sync');
-    const btnSync = document.getElementById('btn-sync-admin');
-
-    // Verifica se está online
-    if (!estaOnline()) {
-        alert("Sem internet no momento. Conecte-se e tente novamente.");
-        return;
-    }
-
-    // Garante que está autenticado no Firebase
-    if (!auth.currentUser) {
-        const sessao = lerSessaoOffline();
-        if (!sessao) {
-            alert("Sessão expirada. Faça login novamente.");
-            return;
-        }
-        const senha = prompt("Digite sua senha para reautenticar (" + sessao.usuario + "):");
-        if (!senha) return;
-
-        try {
-            const emailFake = sessao.usuario + DOMINIO_FICTICIO;
-            await auth.signInWithEmailAndPassword(emailFake, senha);
-            usuarioLogado = sessao.usuario;
-            await salvarCredencial(sessao.usuario, senha);
-        } catch (err) {
-            alert("Falha ao reautenticar. Verifique a senha.");
-            return;
-        }
-    }
-
-    const fila = lerFila();
-    if (fila.length === 0) {
-        if (statusEl) statusEl.textContent = "Nada para sincronizar.";
-        alert("Não há itens pendentes neste dispositivo.");
-        return;
-    }
-
-    if (statusEl) statusEl.textContent = "Sincronizando " + fila.length + " item(ns)...";
-    if (btnSync) btnSync.disabled = true;
-
-    let sucesso = 0;
-    let falhas = 0;
-
-    for (let i = 0; i < fila.length; i++) {
-        const item = fila[i];
-        try {
-            const dados = Object.assign({}, item);
-            delete dados._localId;
-            delete dados._dataLocal;
-
-            if (dados.dataHoraLocal) {
-                dados.dataHora = firebase.firestore.Timestamp.fromDate(new Date(dados.dataHoraLocal));
-                delete dados.dataHoraLocal;
-            } else if (!dados.dataHora) {
-                dados.dataHora = firebase.firestore.FieldValue.serverTimestamp();
-            }
-
-            if (dados._docId) {
-                const docId = dados._docId;
-                delete dados._docId;
-                await db.collection('registros').doc(docId).set(dados, { merge: true });
-            } else {
-                await db.collection('registros').add(dados);
-            }
-
-            removerDaFila(item._localId);
-            sucesso++;
-
-            if (statusEl) statusEl.textContent = `Sincronizando... (${sucesso}/${fila.length})`;
-
-        } catch (err) {
-            console.error("✗ Erro ao sincronizar item:", err);
-            falhas++;
-        }
-    }
-
-    // Registra o momento da última sincronização
-    localStorage.setItem('auditoria_ultima_sync', new Date().toISOString());
-
-    if (btnSync) btnSync.disabled = false;
-
-    if (statusEl) {
-        if (falhas === 0) {
-            statusEl.textContent = `✓ ${sucesso} item(ns) sincronizado(s)!`;
-        } else {
-            statusEl.textContent = `⚠ ${sucesso} OK / ${falhas} falha(s)`;
-        }
-    }
-
-    // Registra a sincronização no Firebase (opcional: log de auditoria)
-    try {
-        await db.collection('sincronizacoes').add({
-            admin: usuarioLogado,
-            total: fila.length,
-            sucesso: sucesso,
-            falhas: falhas,
-            dataHora: firebase.firestore.FieldValue.serverTimestamp()
-        });
-    } catch (e) {
-        console.warn("Não foi possível registrar a sincronização:", e);
-    }
-
-    // Atualiza a UI
-    atualizarInfoPainelAdmin();
-    atualizarIndicadorFila();
-}
-
-// Intercepta a sincronização normal para atualizar o painel do admin
-const _sincronizarFilaOriginal = sincronizarFila;
-window.sincronizarFila = async function(silencioso) {
-    await _sincronizarFilaOriginal(silencioso);
-    atualizarInfoPainelAdmin();
-};
-
-// ... (todas as funções acima)
-
-// ============================================================
-// RETRY AUTOMÁTICO: tenta sincronizar a cada 30 segundos
+// RETRY AUTOMÁTICO: sincroniza a cada 30 segundos
 // ============================================================
 setInterval(() => {
     if (lerFila().length > 0 && estaOnline() && auth.currentUser) {
         sincronizarFila(true);
     }
-    // Atualiza o painel do admin a cada 30s
     if (ehAdmin()) {
         atualizarInfoPainelAdmin();
     }
 }, 30000);
-
-// ============================================================
-// INICIALIZAÇÃO
-// ============================================================
-window.onload = () => {
-    auth.onAuthStateChanged((user) => {
-        // ... resto do código
-    });
-};
 
 // ============================================================
 // INICIALIZAÇÃO
