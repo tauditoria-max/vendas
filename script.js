@@ -1391,11 +1391,16 @@ async function exportarDados() {
 // ============================================================
 // GERAÇÃO DO CONTEÚDO CSV (4 seções)
 // ============================================================
+// ============================================================
+// GERAÇÃO DO CONTEÚDO CSV (com resumos por dia e por loja)
+// ============================================================
 function gerarCSV(registros) {
     const SEP = ";";
     let linhas = [];
 
+    // ============================================================
     // SEÇÃO 1: DETALHADO
+    // ============================================================
     linhas.push("=== DETALHADO ===");
     linhas.push([
         "Data", "Hora", "Tipo", "Loja", "Auditor",
@@ -1437,103 +1442,251 @@ function gerarCSV(registros) {
         ].join(SEP));
     });
 
-    // SEÇÃO 2: RESUMO DE VENDAS
-    linhas.push("");
-    linhas.push("");
-    linhas.push("=== RESUMO POR DIA E AUDITOR (VENDAS) ===");
-    linhas.push(["Data", "Auditor", "Loja", "Qtd. Vendas", "Valor Total (R$)"].join(SEP));
+    // ============================================================
+    // AGREGAÇÕES (vendas, fluxo, perdas)
+    // ============================================================
+    // Estrutura: { data: { loja: { vdQtd, vdTotal, fx_esp_m, fx_esp_f, ... , perdas_qtd } } }
+    const porDiaLoja = {};
 
-    const resumoVendas = {};
     registros.forEach(reg => {
-        if (reg.tipo !== 'venda' || !reg.dataHora) return;
+        if (!reg.dataHora) return;
         const d = reg.dataHora.toDate();
         const dataStr = String(d.getDate()).padStart(2, '0') + '/' +
                         String(d.getMonth() + 1).padStart(2, '0') + '/' +
                         d.getFullYear();
-        const chave = dataStr + "|" + (reg.auditor || "") + "|" + (reg.loja || "");
-        if (!resumoVendas[chave]) {
-            resumoVendas[chave] = { data: dataStr, auditor: reg.auditor || "", loja: reg.loja || "", qtd: 0, total: 0 };
+        const loja = reg.loja || "(sem loja)";
+
+        if (!porDiaLoja[dataStr]) porDiaLoja[dataStr] = {};
+        if (!porDiaLoja[dataStr][loja]) {
+            porDiaLoja[dataStr][loja] = {
+                vdQtd: 0, vdTotal: 0,
+                fxEspM: 0, fxEspF: 0,
+                fxAcompM: 0, fxAcompF: 0,
+                fxOutM: 0, fxOutF: 0,
+                perdas: 0
+            };
         }
-        resumoVendas[chave].qtd++;
-        resumoVendas[chave].total += parseFloat(reg.valor) || 0;
+
+        const bucket = porDiaLoja[dataStr][loja];
+
+        if (reg.tipo === 'venda') {
+            bucket.vdQtd++;
+            bucket.vdTotal += parseFloat(reg.valor) || 0;
+        } else if (reg.tipo === 'fluxo') {
+            bucket.fxEspM = reg.especulador_m || 0;
+            bucket.fxEspF = reg.especulador_f || 0;
+            bucket.fxAcompM = reg.acompanhante_m || 0;
+            bucket.fxAcompF = reg.acompanhante_f || 0;
+            bucket.fxOutM = reg.outros_m || 0;
+            bucket.fxOutF = reg.outros_f || 0;
+        } else if (reg.tipo === 'perda') {
+            bucket.perdas++;
+        }
     });
 
-    let totalGeral = 0, totalVendas = 0;
-    Object.keys(resumoVendas).sort().forEach(chave => {
-        const r = resumoVendas[chave];
-        linhas.push([r.data, r.auditor, r.loja, r.qtd, r.total.toFixed(2).replace('.', ',')].join(SEP));
-        totalGeral += r.total;
-        totalVendas += r.qtd;
-    });
-
-    linhas.push("");
-    linhas.push(["TOTAL GERAL", "", "", totalVendas, totalGeral.toFixed(2).replace('.', ',')].join(SEP));
-
-    // SEÇÃO 3: RESUMO DE FLUXO
+    // ============================================================
+    // SEÇÃO 2: RESUMO POR DIA E LOJA (detalhado)
+    // ============================================================
     linhas.push("");
     linhas.push("");
-    linhas.push("=== RESUMO DE FLUXO POR DIA E AUDITOR ===");
+    linhas.push("=== RESUMO POR DIA E LOJA ===");
     linhas.push([
-        "Data", "Auditor", "Loja",
+        "Data", "Loja",
+        "Qtd. Vendas", "Total Vendas (R$)",
         "Esp. M", "Esp. F",
         "Acomp. M", "Acomp. F",
         "Outros M", "Outros F",
-        "Total M", "Total F"
+        "Total Fluxo M", "Total Fluxo F",
+        "Qtd. Perdas"
     ].join(SEP));
 
-    const resumoFluxo = {};
-    registros.forEach(reg => {
-        if (reg.tipo !== 'fluxo' || !reg.dataHora) return;
-        const d = reg.dataHora.toDate();
-        const dataStr = String(d.getDate()).padStart(2, '0') + '/' +
-                        String(d.getMonth() + 1).padStart(2, '0') + '/' +
-                        d.getFullYear();
-        const chave = dataStr + "|" + (reg.auditor || "") + "|" + (reg.loja || "");
-        if (!resumoFluxo[chave]) {
-            resumoFluxo[chave] = {
-                data: dataStr, auditor: reg.auditor || "", loja: reg.loja || "",
-                esp_m: 0, esp_f: 0, acomp_m: 0, acomp_f: 0, out_m: 0, out_f: 0
-            };
-        }
-        resumoFluxo[chave].esp_m = reg.especulador_m || 0;
-        resumoFluxo[chave].esp_f = reg.especulador_f || 0;
-        resumoFluxo[chave].acomp_m = reg.acompanhante_m || 0;
-        resumoFluxo[chave].acomp_f = reg.acompanhante_f || 0;
-        resumoFluxo[chave].out_m = reg.outros_m || 0;
-        resumoFluxo[chave].out_f = reg.outros_f || 0;
-    });
+    let g_vdQtd = 0, g_vdTotal = 0;
+    let g_fxM = 0, g_fxF = 0;
+    let g_perdas = 0;
 
-    let tEspM = 0, tEspF = 0, tAcompM = 0, tAcompF = 0, tOutM = 0, tOutF = 0;
+    Object.keys(porDiaLoja).sort().forEach(dataStr => {
+        Object.keys(porDiaLoja[dataStr]).sort().forEach(loja => {
+            const b = porDiaLoja[dataStr][loja];
+            const totalFluxoM = b.fxEspM + b.fxAcompM + b.fxOutM;
+            const totalFluxoF = b.fxEspF + b.fxAcompF + b.fxOutF;
 
-    Object.keys(resumoFluxo).sort().forEach(chave => {
-        const r = resumoFluxo[chave];
-        const totalM = r.esp_m + r.acomp_m + r.out_m;
-        const totalF = r.esp_f + r.acomp_f + r.out_f;
+            linhas.push([
+                dataStr, loja,
+                b.vdQtd, b.vdTotal.toFixed(2).replace('.', ','),
+                b.fxEspM, b.fxEspF,
+                b.fxAcompM, b.fxAcompF,
+                b.fxOutM, b.fxOutF,
+                totalFluxoM, totalFluxoF,
+                b.perdas
+            ].join(SEP));
 
-        linhas.push([
-            r.data, r.auditor, r.loja,
-            r.esp_m, r.esp_f,
-            r.acomp_m, r.acomp_f,
-            r.out_m, r.out_f,
-            totalM, totalF
-        ].join(SEP));
-
-        tEspM += r.esp_m; tEspF += r.esp_f;
-        tAcompM += r.acomp_m; tAcompF += r.acomp_f;
-        tOutM += r.out_m; tOutF += r.out_f;
+            g_vdQtd += b.vdQtd;
+            g_vdTotal += b.vdTotal;
+            g_fxM += totalFluxoM;
+            g_fxF += totalFluxoF;
+            g_perdas += b.perdas;
+        });
     });
 
     linhas.push("");
     linhas.push([
-        "TOTAL GERAL FLUXO", "", "",
-        tEspM, tEspF,
-        tAcompM, tAcompF,
-        tOutM, tOutF,
-        tEspM + tAcompM + tOutM,
-        tEspF + tAcompF + tOutF
+        "TOTAL GERAL", "",
+        g_vdQtd, g_vdTotal.toFixed(2).replace('.', ','),
+        "", "", "", "", "", "",
+        g_fxM, g_fxF,
+        g_perdas
     ].join(SEP));
 
-    // SEÇÃO 4: RESUMO DE PERDAS
+    // ============================================================
+    // SEÇÃO 3: TOTAL POR DIA (todas as lojas somadas)
+    // ============================================================
+    linhas.push("");
+    linhas.push("");
+    linhas.push("=== TOTAL POR DIA (todas as lojas) ===");
+    linhas.push([
+        "Data",
+        "Qtd. Vendas", "Total Vendas (R$)",
+        "Esp. M", "Esp. F",
+        "Acomp. M", "Acomp. F",
+        "Outros M", "Outros F",
+        "Total Fluxo M", "Total Fluxo F",
+        "Qtd. Perdas"
+    ].join(SEP));
+
+    let td_vdQtd = 0, td_vdTotal = 0;
+    let td_fxM = 0, td_fxF = 0;
+    let td_perdas = 0;
+
+    Object.keys(porDiaLoja).sort().forEach(dataStr => {
+        let vdQtd = 0, vdTotal = 0;
+        let fxEspM = 0, fxEspF = 0;
+        let fxAcompM = 0, fxAcompF = 0;
+        let fxOutM = 0, fxOutF = 0;
+        let perdas = 0;
+
+        Object.keys(porDiaLoja[dataStr]).forEach(loja => {
+            const b = porDiaLoja[dataStr][loja];
+            vdQtd += b.vdQtd;
+            vdTotal += b.vdTotal;
+            fxEspM += b.fxEspM;
+            fxEspF += b.fxEspF;
+            fxAcompM += b.fxAcompM;
+            fxAcompF += b.fxAcompF;
+            fxOutM += b.fxOutM;
+            fxOutF += b.fxOutF;
+            perdas += b.perdas;
+        });
+
+        const totalFluxoM = fxEspM + fxAcompM + fxOutM;
+        const totalFluxoF = fxEspF + fxAcompF + fxOutF;
+
+        linhas.push([
+            dataStr,
+            vdQtd, vdTotal.toFixed(2).replace('.', ','),
+            fxEspM, fxEspF,
+            fxAcompM, fxAcompF,
+            fxOutM, fxOutF,
+            totalFluxoM, totalFluxoF,
+            perdas
+        ].join(SEP));
+
+        td_vdQtd += vdQtd;
+        td_vdTotal += vdTotal;
+        td_fxM += totalFluxoM;
+        td_fxF += totalFluxoF;
+        td_perdas += perdas;
+    });
+
+    linhas.push("");
+    linhas.push([
+        "TOTAL GERAL",
+        td_vdQtd, td_vdTotal.toFixed(2).replace('.', ','),
+        "", "", "", "", "", "",
+        td_fxM, td_fxF,
+        td_perdas
+    ].join(SEP));
+
+    // ============================================================
+    // SEÇÃO 4: TOTAL POR LOJA (todos os dias somados)
+    // ============================================================
+    linhas.push("");
+    linhas.push("");
+    linhas.push("=== TOTAL POR LOJA (todos os dias) ===");
+    linhas.push([
+        "Loja",
+        "Qtd. Vendas", "Total Vendas (R$)",
+        "Esp. M", "Esp. F",
+        "Acomp. M", "Acomp. F",
+        "Outros M", "Outros F",
+        "Total Fluxo M", "Total Fluxo F",
+        "Qtd. Perdas"
+    ].join(SEP));
+
+    // Reagrupa por loja
+    const porLoja = {};
+    Object.keys(porDiaLoja).forEach(dataStr => {
+        Object.keys(porDiaLoja[dataStr]).forEach(loja => {
+            if (!porLoja[loja]) {
+                porLoja[loja] = {
+                    vdQtd: 0, vdTotal: 0,
+                    fxEspM: 0, fxEspF: 0,
+                    fxAcompM: 0, fxAcompF: 0,
+                    fxOutM: 0, fxOutF: 0,
+                    perdas: 0
+                };
+            }
+            const b = porDiaLoja[dataStr][loja];
+            const p = porLoja[loja];
+            p.vdQtd += b.vdQtd;
+            p.vdTotal += b.vdTotal;
+            p.fxEspM += b.fxEspM;
+            p.fxEspF += b.fxEspF;
+            p.fxAcompM += b.fxAcompM;
+            p.fxAcompF += b.fxAcompF;
+            p.fxOutM += b.fxOutM;
+            p.fxOutF += b.fxOutF;
+            p.perdas += b.perdas;
+        });
+    });
+
+    let tl_vdQtd = 0, tl_vdTotal = 0;
+    let tl_fxM = 0, tl_fxF = 0;
+    let tl_perdas = 0;
+
+    Object.keys(porLoja).sort().forEach(loja => {
+        const p = porLoja[loja];
+        const totalFluxoM = p.fxEspM + p.fxAcompM + p.fxOutM;
+        const totalFluxoF = p.fxEspF + p.fxAcompF + p.fxOutF;
+
+        linhas.push([
+            loja,
+            p.vdQtd, p.vdTotal.toFixed(2).replace('.', ','),
+            p.fxEspM, p.fxEspF,
+            p.fxAcompM, p.fxAcompF,
+            p.fxOutM, p.fxOutF,
+            totalFluxoM, totalFluxoF,
+            p.perdas
+        ].join(SEP));
+
+        tl_vdQtd += p.vdQtd;
+        tl_vdTotal += p.vdTotal;
+        tl_fxM += totalFluxoM;
+        tl_fxF += totalFluxoF;
+        tl_perdas += p.perdas;
+    });
+
+    linhas.push("");
+    linhas.push([
+        "TOTAL GERAL",
+        tl_vdQtd, tl_vdTotal.toFixed(2).replace('.', ','),
+        "", "", "", "", "", "",
+        tl_fxM, tl_fxF,
+        tl_perdas
+    ].join(SEP));
+
+    // ============================================================
+    // SEÇÃO 5: RESUMO DE PERDAS POR MOTIVO
+    // ============================================================
     linhas.push("");
     linhas.push("");
     linhas.push("=== RESUMO DE PERDAS POR MOTIVO ===");
