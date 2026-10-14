@@ -1287,6 +1287,9 @@ function fecharExportacao() {
 // ============================================================
 // EXPORTAÇÃO - GERAR CSV
 // ============================================================
+// ============================================================
+// EXPORTAÇÃO - GERAR CSV (inclui fila local + logins)
+// ============================================================
 async function exportarDados() {
     if (!ehAdmin()) {
         alert("Apenas o administrador pode exportar dados.");
@@ -1324,6 +1327,7 @@ async function exportarDados() {
         if (incluirFluxo) tipos.push('fluxo');
         if (incluirPerdas) tipos.push('perda');
 
+        // ---------- REGISTROS ----------
         for (let i = 0; i < tipos.length; i++) {
             const tipo = tipos[i];
             const snapshot = await db.collection('registros')
@@ -1363,7 +1367,31 @@ async function exportarDados() {
             }
         });
 
-        if (todosRegistros.length === 0) {
+        // ---------- LOGINS ----------
+        let todosLogins = [];
+        try {
+            const snapshotLogins = await db.collection('logins').get();
+            snapshotLogins.forEach(doc => {
+                const data = doc.data();
+                data._id = doc.id;
+
+                // Filtro por auditor (se o admin escolher um específico)
+                if (auditor && data.usuario && data.usuario.toLowerCase() !== auditor) return;
+
+                if (data.dataHora) {
+                    const ts = data.dataHora.toMillis();
+                    if (ts < dataInicio.getTime() || ts > dataFim.getTime()) return;
+                } else {
+                    return;
+                }
+
+                todosLogins.push(data);
+            });
+        } catch (err) {
+            console.warn("Erro ao buscar logins:", err);
+        }
+
+        if (todosRegistros.length === 0 && todosLogins.length === 0) {
             statusEl.textContent = "Nenhum registro encontrado no período.";
             statusEl.className = "fluxo-status";
             return;
@@ -1375,10 +1403,16 @@ async function exportarDados() {
             return ta - tb;
         });
 
-        const csv = gerarCSV(todosRegistros);
+        todosLogins.sort((a, b) => {
+            const ta = a.dataHora ? a.dataHora.toMillis() : 0;
+            const tb = b.dataHora ? b.dataHora.toMillis() : 0;
+            return ta - tb;
+        });
+
+        const csv = gerarCSV(todosRegistros, todosLogins);
         baixarCSV(csv, 'auditoria_' + dataInicioStr + '_a_' + dataFimStr + '.csv');
 
-        statusEl.textContent = '✓ ' + todosRegistros.length + ' registros exportados!';
+        statusEl.textContent = '✓ ' + todosRegistros.length + ' registros e ' + todosLogins.length + ' logins exportados!';
         statusEl.className = "fluxo-status";
 
     } catch (error) {
@@ -1394,7 +1428,7 @@ async function exportarDados() {
 // ============================================================
 // GERAÇÃO DO CONTEÚDO CSV (com resumos por dia e por loja)
 // ============================================================
-function gerarCSV(registros) {
+function gerarCSV(registros, logins) {
     const SEP = ";";
     let linhas = [];
 
@@ -1708,6 +1742,37 @@ function gerarCSV(registros) {
 
     linhas.push("");
     linhas.push(["TOTAL DE PERDAS", totalPerdas].join(SEP));
+
+    // ============================================================
+// SEÇÃO 6: LOGINS (nova)
+// ============================================================
+if (logins && logins.length > 0) {
+    linhas.push("");
+    linhas.push("");
+    linhas.push("=== LOGINS REALIZADOS ===");
+    linhas.push(["Data", "Hora", "Usuário"].join(SEP));
+
+    logins.forEach(lg => {
+        let dataStr = "", horaStr = "";
+        if (lg.dataHora) {
+            const d = lg.dataHora.toDate();
+            dataStr = String(d.getDate()).padStart(2, '0') + '/' +
+                      String(d.getMonth() + 1).padStart(2, '0') + '/' +
+                      d.getFullYear();
+            horaStr = String(d.getHours()).padStart(2, '0') + ':' +
+                      String(d.getMinutes()).padStart(2, '0') + ':' +
+                      String(d.getSeconds()).padStart(2, '0');
+        }
+        linhas.push([
+            dataStr,
+            horaStr,
+            lg.usuario || ""
+        ].join(SEP));
+    });
+
+    linhas.push("");
+    linhas.push(["TOTAL DE LOGINS", logins.length].join(SEP));
+}
 
     return linhas.join("\r\n");
 }
